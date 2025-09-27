@@ -1,0 +1,1622 @@
+# .NET Web API Coding Standards & Code Review Document
+
+**Version:** 1.0  
+**Last Updated:** September 2025  
+**Architecture:** Domain-Driven Design (DDD)  
+**Framework:** .NET 6/7/8+  
+**ORM:** Entity Framework Core  
+
+---
+
+## Table of Contents
+
+- [1. Project Structure](#1-project-structure)
+- [2. Naming Conventions](#2-naming-conventions)
+- [3. Code Organization](#3-code-organization)
+- [4. Domain Layer Standards](#4-domain-layer-standards)
+- [5. Repository Pattern](#5-repository-pattern)
+- [6. DTOs & Mapping](#6-dtos--mapping)
+- [7. Entity Framework Core](#7-entity-framework-core)
+- [8. Validation Standards](#8-validation-standards)
+- [9. API Request/Response Patterns](#9-api-requestresponse-patterns)
+- [10. Asynchronous Programming](#10-asynchronous-programming)
+- [11. Exception Handling](#11-exception-handling)
+- [12. Dependency Injection](#12-dependency-injection)
+- [13. Logging Standards](#13-logging-standards)
+- [14. Security Guidelines](#14-security-guidelines)
+- [15. Testing Standards](#15-testing-standards)
+- [16. Code Review Checklist](#16-code-review-checklist)
+- [17. Performance Guidelines](#17-performance-guidelines)
+- [18. Documentation Standards](#18-documentation-standards)
+
+---
+
+## 1. Project Structure
+
+### Recommended Solution Structure
+
+```
+/src
+  /CompanyName.ProductName.API          → Controllers, Middleware, Program.cs
+  /CompanyName.ProductName.Application  → DTOs, Services, Validators, Interfaces
+  /CompanyName.ProductName.Domain       → Entities, Aggregates, Value Objects, Domain Services
+  /CompanyName.ProductName.Infrastructure → EF Core, Repositories, External Services
+  /CompanyName.ProductName.Shared       → Common utilities, extensions, constants
+/tests
+  /CompanyName.ProductName.UnitTests    → Domain and Application layer tests
+  /CompanyName.ProductName.IntegrationTests → API and Infrastructure tests
+/docs
+  → API documentation, architecture diagrams
+```
+
+### Layer Dependencies
+
+- **API Layer** → Application Layer
+- **Application Layer** → Domain Layer
+- **Infrastructure Layer** → Domain Layer
+- **Domain Layer** → No dependencies on other layers
+
+---
+
+## 2. Naming Conventions
+
+### General Naming Rules
+
+| Element | Convention | Example | Notes |
+|---------|------------|---------|--------|
+| Classes | PascalCase | `OrderService`, `UserController` | Descriptive and specific |
+| Interfaces | PascalCase + 'I' prefix | `IOrderRepository`, `IEmailService` | Always start with 'I' |
+| Methods | PascalCase | `GetByIdAsync()`, `CreateOrder()` | Use verbs, include Async suffix for async methods |
+| Properties | PascalCase | `UserId`, `CreatedDate` | Noun-based |
+| Fields (private) | camelCase with underscore | `_dbContext`, `_logger` | Private fields only |
+| Parameters | camelCase | `userId`, `orderRequest` | Descriptive |
+| Local Variables | camelCase | `user`, `orderItems` | Short but clear |
+| Constants | UPPER_SNAKE_CASE | `MAX_RETRY_COUNT`, `DEFAULT_TIMEOUT` | All caps with underscores |
+| Enums | PascalCase | `OrderStatus`, `PaymentMethod` | Singular noun |
+| Enum Values | PascalCase | `Pending`, `Completed` | No prefixes |
+
+### File and Folder Naming
+
+- **Folders:** PascalCase (`Controllers`, `Services`, `Entities`)
+- **Files:** Match the primary class name exactly
+- **Test Files:** `{ClassUnderTest}Tests.cs` (e.g., `OrderServiceTests.cs`)
+
+---
+
+## 3. Code Organization
+
+### Class Structure Order
+
+1. Constants and static readonly fields
+2. Private fields
+3. Public properties
+4. Constructors
+5. Public methods
+6. Private methods
+
+### Method Organization
+
+- Group related methods together
+- Keep public methods at the top
+- Order methods by importance/usage frequency
+- Use regions sparingly and only for large classes
+
+```csharp
+public class OrderService : IOrderService
+{
+    // 1. Constants
+    private const int MAX_ITEMS_PER_ORDER = 100;
+    
+    // 2. Private fields
+    private readonly IOrderRepository _orderRepository;
+    private readonly ILogger<OrderService> _logger;
+    
+    // 3. Constructor
+    public OrderService(IOrderRepository orderRepository, ILogger<OrderService> logger)
+    {
+        _orderRepository = orderRepository ?? throw new ArgumentNullException(nameof(orderRepository));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+    
+    // 4. Public methods
+    public async Task<OrderDto> GetByIdAsync(Guid id)
+    {
+        // Implementation
+    }
+    
+    // 5. Private methods
+    private bool ValidateOrderItems(List<OrderItemDto> items)
+    {
+        // Implementation
+    }
+}
+```
+
+---
+
+## 4. Domain Layer Standards
+
+### Entity Design Principles
+
+- Entities should encapsulate business logic
+- Use private setters with public constructors or factory methods
+- Implement validation within the entity
+- Use domain events for cross-aggregate communication
+
+```csharp
+public class Order : AggregateRoot
+{
+    private readonly List<OrderItem> _items = new();
+    
+    public Guid Id { get; private set; }
+    public Guid CustomerId { get; private set; }
+    public DateTime CreatedDate { get; private set; }
+    public OrderStatus Status { get; private set; }
+    public IReadOnlyCollection<OrderItem> Items => _items.AsReadOnly();
+    
+    // Private constructor for EF Core
+    private Order() { }
+    
+    // Public factory method
+    public static Order Create(Guid customerId)
+    {
+        var order = new Order
+        {
+            Id = Guid.NewGuid(),
+            CustomerId = customerId,
+            CreatedDate = DateTime.UtcNow,
+            Status = OrderStatus.Draft
+        };
+        
+        order.AddDomainEvent(new OrderCreatedEvent(order.Id));
+        return order;
+    }
+    
+    public void AddItem(Guid productId, int quantity, decimal unitPrice)
+    {
+        if (Status != OrderStatus.Draft)
+            throw new DomainException("Cannot modify confirmed order");
+            
+        if (quantity <= 0)
+            throw new DomainException("Quantity must be greater than zero");
+            
+        if (_items.Count >= MAX_ITEMS_PER_ORDER)
+            throw new DomainException($"Order cannot contain more than {MAX_ITEMS_PER_ORDER} items");
+            
+        var existingItem = _items.FirstOrDefault(x => x.ProductId == productId);
+        if (existingItem != null)
+        {
+            existingItem.UpdateQuantity(existingItem.Quantity + quantity);
+        }
+        else
+        {
+            _items.Add(new OrderItem(productId, quantity, unitPrice));
+        }
+    }
+}
+```
+
+### Value Objects
+
+- Immutable by design
+- Equality based on all properties
+- No identity
+
+```csharp
+public class Money : ValueObject
+{
+    public decimal Amount { get; }
+    public string Currency { get; }
+    
+    public Money(decimal amount, string currency)
+    {
+        if (amount < 0)
+            throw new ArgumentException("Amount cannot be negative");
+        if (string.IsNullOrWhiteSpace(currency))
+            throw new ArgumentException("Currency is required");
+            
+        Amount = amount;
+        Currency = currency.ToUpperInvariant();
+    }
+    
+    protected override IEnumerable<object> GetEqualityComponents()
+    {
+        yield return Amount;
+        yield return Currency;
+    }
+}
+```
+
+---
+
+## 5. Repository Pattern
+
+### Interface Design (Domain Layer)
+
+```csharp
+public interface IOrderRepository
+{
+    Task<Order?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default);
+    Task<IEnumerable<Order>> GetByCustomerIdAsync(Guid customerId, CancellationToken cancellationToken = default);
+    Task<Order> AddAsync(Order order, CancellationToken cancellationToken = default);
+    Task UpdateAsync(Order order, CancellationToken cancellationToken = default);
+    Task DeleteAsync(Order order, CancellationToken cancellationToken = default);
+    Task SaveChangesAsync(CancellationToken cancellationToken = default);
+    Task<bool> ExistsAsync(Guid id, CancellationToken cancellationToken = default);
+    Task<IEnumerable<Order>> FindAsync(Expression<Func<Order, bool>> predicate, CancellationToken cancellationToken = default);
+}
+```
+
+### Implementation (Infrastructure Layer)
+
+```csharp
+public class OrderRepository : IOrderRepository
+{
+    private readonly AppDbContext _context;
+    private readonly ILogger<OrderRepository> _logger;
+    
+    public OrderRepository(AppDbContext context, ILogger<OrderRepository> logger)
+    {
+        _context = context ?? throw new ArgumentNullException(nameof(context));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+    
+    public async Task<Order?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        _logger.LogDebug("Getting order by id: {OrderId}", id);
+        
+        return await _context.Orders
+            .Include(o => o.Items)
+            .AsSplitQuery()
+            .FirstOrDefaultAsync(o => o.Id == id, cancellationToken);
+    }
+    
+    public async Task<Order> AddAsync(Order order, CancellationToken cancellationToken = default)
+    {
+        _logger.LogDebug("Adding new order: {OrderId}", order.Id);
+        
+        var entry = await _context.Orders.AddAsync(order, cancellationToken);
+        return entry.Entity;
+    }
+    
+    public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _context.SaveChangesAsync(cancellationToken);
+            _logger.LogDebug("Changes saved successfully");
+        }
+        catch (DbUpdateConcurrencyException ex)
+        {
+            _logger.LogError(ex, "Concurrency conflict occurred while saving changes");
+            throw;
+        }
+    }
+}
+```
+
+---
+
+## 6. DTOs & Mapping
+
+### DTO Design Principles
+
+- Keep DTOs flat and simple
+- Use record types for immutable DTOs
+- Separate Request and Response DTOs
+- Use meaningful names with suffixes (Request, Response, Dto)
+
+### Request DTOs
+
+```csharp
+public record CreateOrderRequest
+{
+    public Guid CustomerId { get; init; }
+    public List<CreateOrderItemRequest> Items { get; init; } = new();
+    
+    public record CreateOrderItemRequest
+    {
+        public Guid ProductId { get; init; }
+        public int Quantity { get; init; }
+        public decimal UnitPrice { get; init; }
+    }
+}
+
+public record UpdateOrderRequest
+{
+    public List<UpdateOrderItemRequest> Items { get; init; } = new();
+    
+    public record UpdateOrderItemRequest
+    {
+        public Guid ProductId { get; init; }
+        public int Quantity { get; init; }
+    }
+}
+```
+
+### Response DTOs
+
+```csharp
+public record OrderResponse
+{
+    public Guid Id { get; init; }
+    public Guid CustomerId { get; init; }
+    public DateTime CreatedDate { get; init; }
+    public string Status { get; init; } = string.Empty;
+    public decimal TotalAmount { get; init; }
+    public List<OrderItemResponse> Items { get; init; } = new();
+    
+    public record OrderItemResponse
+    {
+        public Guid ProductId { get; init; }
+        public string ProductName { get; init; } = string.Empty;
+        public int Quantity { get; init; }
+        public decimal UnitPrice { get; init; }
+        public decimal TotalPrice { get; init; }
+    }
+}
+```
+
+### Mapping with AutoMapper
+
+```csharp
+public class OrderMappingProfile : Profile
+{
+    public OrderMappingProfile()
+    {
+        CreateMap<Order, OrderResponse>()
+            .ForMember(dest => dest.Status, opt => opt.MapFrom(src => src.Status.ToString()))
+            .ForMember(dest => dest.TotalAmount, opt => opt.MapFrom(src => src.Items.Sum(i => i.TotalPrice)));
+            
+        CreateMap<OrderItem, OrderResponse.OrderItemResponse>()
+            .ForMember(dest => dest.TotalPrice, opt => opt.MapFrom(src => src.Quantity * src.UnitPrice));
+            
+        CreateMap<CreateOrderRequest, Order>()
+            .ForMember(dest => dest.Id, opt => opt.Ignore())
+            .ForMember(dest => dest.CreatedDate, opt => opt.Ignore())
+            .ForMember(dest => dest.Status, opt => opt.Ignore());
+    }
+}
+```
+
+### Custom Mapping (Alternative)
+
+```csharp
+public static class OrderMapper
+{
+    public static OrderResponse ToResponse(Order order)
+    {
+        ArgumentNullException.ThrowIfNull(order);
+        
+        return new OrderResponse
+        {
+            Id = order.Id,
+            CustomerId = order.CustomerId,
+            CreatedDate = order.CreatedDate,
+            Status = order.Status.ToString(),
+            TotalAmount = order.Items.Sum(i => i.Quantity * i.UnitPrice),
+            Items = order.Items.Select(ToItemResponse).ToList()
+        };
+    }
+    
+    private static OrderResponse.OrderItemResponse ToItemResponse(OrderItem item)
+    {
+        return new OrderResponse.OrderItemResponse
+        {
+            ProductId = item.ProductId,
+            ProductName = item.ProductName,
+            Quantity = item.Quantity,
+            UnitPrice = item.UnitPrice,
+            TotalPrice = item.Quantity * item.UnitPrice
+        };
+    }
+}
+```
+
+---
+
+## 7. Entity Framework Core
+
+### DbContext Design
+
+```csharp
+public class AppDbContext : DbContext
+{
+    public DbSet<Order> Orders => Set<Order>();
+    public DbSet<Product> Products => Set<Product>();
+    public DbSet<Customer> Customers => Set<Customer>();
+    
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options)
+    {
+    }
+    
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // Apply all configurations from assembly
+        modelBuilder.ApplyConfigurationsFromAssembly(typeof(AppDbContext).Assembly);
+        
+        // Global query filters (soft delete, tenant isolation, etc.)
+        modelBuilder.Entity<Order>().HasQueryFilter(e => !e.IsDeleted);
+        
+        base.OnModelCreating(modelBuilder);
+    }
+    
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        if (!optionsBuilder.IsConfigured)
+        {
+            // Development configuration
+            optionsBuilder.EnableSensitiveDataLogging();
+            optionsBuilder.EnableDetailedErrors();
+        }
+        
+        base.OnConfiguring(optionsBuilder);
+    }
+    
+    public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        // Handle audit fields
+        foreach (var entry in ChangeTracker.Entries<IAuditableEntity>())
+        {
+            switch (entry.State)
+            {
+                case EntityState.Added:
+                    entry.Entity.CreatedDate = DateTime.UtcNow;
+                    entry.Entity.CreatedBy = GetCurrentUser();
+                    break;
+                case EntityState.Modified:
+                    entry.Entity.ModifiedDate = DateTime.UtcNow;
+                    entry.Entity.ModifiedBy = GetCurrentUser();
+                    break;
+            }
+        }
+        
+        return await base.SaveChangesAsync(cancellationToken);
+    }
+    
+    private string GetCurrentUser()
+    {
+        // Get current user from HttpContext or other source
+        return "system"; // Placeholder
+    }
+}
+```
+
+### Entity Configuration
+
+```csharp
+public class OrderConfiguration : IEntityTypeConfiguration<Order>
+{
+    public void Configure(EntityTypeBuilder<Order> builder)
+    {
+        builder.HasKey(o => o.Id);
+        
+        builder.Property(o => o.Id)
+            .ValueGeneratedNever(); // We generate GUIDs in domain
+            
+        builder.Property(o => o.CustomerId)
+            .IsRequired();
+            
+        builder.Property(o => o.CreatedDate)
+            .IsRequired()
+            .HasDefaultValueSql("GETUTCDATE()");
+            
+        builder.Property(o => o.Status)
+            .IsRequired()
+            .HasConversion<string>()
+            .HasMaxLength(50);
+            
+        // Configure owned entities (value objects)
+        builder.OwnsMany(o => o.Items, item =>
+        {
+            item.WithOwner().HasForeignKey("OrderId");
+            item.HasKey("Id");
+            item.Property<Guid>("Id").ValueGeneratedOnAdd();
+            
+            item.Property(i => i.ProductId).IsRequired();
+            item.Property(i => i.Quantity).IsRequired();
+            item.Property(i => i.UnitPrice).IsRequired().HasColumnType("decimal(18,2)");
+        });
+        
+        // Indexes
+        builder.HasIndex(o => o.CustomerId).HasDatabaseName("IX_Orders_CustomerId");
+        builder.HasIndex(o => o.CreatedDate).HasDatabaseName("IX_Orders_CreatedDate");
+        
+        // Table configuration
+        builder.ToTable("Orders");
+    }
+}
+```
+
+---
+
+## 8. Validation Standards
+
+### FluentValidation Implementation
+
+```csharp
+public class CreateOrderRequestValidator : AbstractValidator<CreateOrderRequest>
+{
+    public CreateOrderRequestValidator()
+    {
+        RuleFor(x => x.CustomerId)
+            .NotEmpty()
+            .WithMessage("Customer ID is required");
+            
+        RuleFor(x => x.Items)
+            .NotEmpty()
+            .WithMessage("Order must contain at least one item")
+            .Must(items => items.Count <= 100)
+            .WithMessage("Order cannot contain more than 100 items");
+            
+        RuleForEach(x => x.Items)
+            .SetValidator(new CreateOrderItemRequestValidator());
+    }
+}
+
+public class CreateOrderItemRequestValidator : AbstractValidator<CreateOrderRequest.CreateOrderItemRequest>
+{
+    public CreateOrderItemRequestValidator()
+    {
+        RuleFor(x => x.ProductId)
+            .NotEmpty()
+            .WithMessage("Product ID is required");
+            
+        RuleFor(x => x.Quantity)
+            .GreaterThan(0)
+            .WithMessage("Quantity must be greater than 0")
+            .LessThanOrEqualTo(1000)
+            .WithMessage("Quantity cannot exceed 1000");
+            
+        RuleFor(x => x.UnitPrice)
+            .GreaterThan(0)
+            .WithMessage("Unit price must be greater than 0")
+            .LessThan(1000000)
+            .WithMessage("Unit price cannot exceed 1,000,000");
+    }
+}
+```
+
+### Custom Validation Attributes
+
+```csharp
+[AttributeUsage(AttributeTargets.Property | AttributeTargets.Parameter)]
+public class NotEmptyGuidAttribute : ValidationAttribute
+{
+    public override bool IsValid(object? value)
+    {
+        if (value is Guid guid)
+        {
+            return guid != Guid.Empty;
+        }
+        return false;
+    }
+    
+    public override string FormatErrorMessage(string name)
+    {
+        return $"The {name} field cannot be empty GUID";
+    }
+}
+```
+
+---
+
+## 9. API Request/Response Patterns
+
+### Standardized API Response
+
+```csharp
+public class ApiResponse<T>
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public T? Data { get; set; }
+    public List<string> Errors { get; set; } = new();
+    public object? Metadata { get; set; }
+    
+    public static ApiResponse<T> Ok(T data, string? message = null, object? metadata = null)
+    {
+        return new ApiResponse<T>
+        {
+            Success = true,
+            Data = data,
+            Message = message,
+            Metadata = metadata
+        };
+    }
+    
+    public static ApiResponse<T> Fail(string error, string? message = null)
+    {
+        return new ApiResponse<T>
+        {
+            Success = false,
+            Message = message,
+            Errors = new List<string> { error }
+        };
+    }
+    
+    public static ApiResponse<T> Fail(List<string> errors, string? message = null)
+    {
+        return new ApiResponse<T>
+        {
+            Success = false,
+            Message = message,
+            Errors = errors
+        };
+    }
+}
+```
+
+### Pagination Response
+
+```csharp
+public class PagedResponse<T> : ApiResponse<List<T>>
+{
+    public int PageNumber { get; set; }
+    public int PageSize { get; set; }
+    public int TotalRecords { get; set; }
+    public int TotalPages { get; set; }
+    public bool HasNextPage { get; set; }
+    public bool HasPreviousPage { get; set; }
+    
+    public static PagedResponse<T> Create(List<T> data, int pageNumber, int pageSize, int totalRecords)
+    {
+        var totalPages = (int)Math.Ceiling((double)totalRecords / pageSize);
+        
+        return new PagedResponse<T>
+        {
+            Success = true,
+            Data = data,
+            PageNumber = pageNumber,
+            PageSize = pageSize,
+            TotalRecords = totalRecords,
+            TotalPages = totalPages,
+            HasNextPage = pageNumber < totalPages,
+            HasPreviousPage = pageNumber > 1
+        };
+    }
+}
+```
+
+### Controller Standards
+
+```csharp
+[ApiController]
+[Route("api/[controller]")]
+[Produces("application/json")]
+public class OrdersController : ControllerBase
+{
+    private readonly IOrderService _orderService;
+    private readonly ILogger<OrdersController> _logger;
+    
+    public OrdersController(IOrderService orderService, ILogger<OrdersController> logger)
+    {
+        _orderService = orderService ?? throw new ArgumentNullException(nameof(orderService));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+    
+    /// <summary>
+    /// Retrieves an order by its unique identifier
+    /// </summary>
+    /// <param name="id">The unique identifier of the order</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>The order details if found</returns>
+    /// <response code="200">Order found and returned successfully</response>
+    /// <response code="404">Order not found</response>
+    /// <response code="500">Internal server error</response>
+    [HttpGet("{id:guid}")]
+    [ProducesResponseType(typeof(ApiResponse<OrderResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<string>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<string>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> GetById(
+        [FromRoute] Guid id, 
+        CancellationToken cancellationToken = default)
+    {
+        _logger.LogDebug("Getting order by ID: {OrderId}", id);
+        
+        var order = await _orderService.GetByIdAsync(id, cancellationToken);
+        
+        if (order == null)
+        {
+            _logger.LogWarning("Order not found: {OrderId}", id);
+            return NotFound(ApiResponse<string>.Fail("Order not found"));
+        }
+        
+        return Ok(ApiResponse<OrderResponse>.Ok(order, "Order retrieved successfully"));
+    }
+    
+    /// <summary>
+    /// Creates a new order
+    /// </summary>
+    /// <param name="request">Order creation request</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>The created order</returns>
+    [HttpPost]
+    [ProducesResponseType(typeof(ApiResponse<OrderResponse>), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ApiResponse<string>), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> Create(
+        [FromBody] CreateOrderRequest request, 
+        CancellationToken cancellationToken = default)
+    {
+        _logger.LogDebug("Creating order for customer: {CustomerId}", request.CustomerId);
+        
+        var order = await _orderService.CreateAsync(request, cancellationToken);
+        
+        return CreatedAtAction(
+            nameof(GetById), 
+            new { id = order.Id }, 
+            ApiResponse<OrderResponse>.Ok(order, "Order created successfully"));
+    }
+}
+```
+
+---
+
+## 10. Asynchronous Programming
+
+### Async/Await Guidelines
+
+**DO:**
+- Always use `async/await` for I/O operations
+- Include `CancellationToken` parameters
+- Use `ConfigureAwait(false)` in library code
+- Return `Task` or `Task<T>` from async methods
+- Use async suffix for method names
+
+**DON'T:**
+- Use `.Result` or `.Wait()`
+- Use `async void` (except event handlers)
+- Create unnecessary async wrappers
+- Mix async and sync code carelessly
+
+```csharp
+// ✅ Good
+public async Task<OrderDto> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
+{
+    var order = await _repository.GetByIdAsync(id, cancellationToken).ConfigureAwait(false);
+    return _mapper.Map<OrderDto>(order);
+}
+
+// ❌ Bad
+public OrderDto GetById(Guid id)
+{
+    var task = _repository.GetByIdAsync(id);
+    return _mapper.Map<OrderDto>(task.Result); // Deadlock risk
+}
+
+// ✅ Good - Parallel execution
+public async Task<(OrderDto Order, CustomerDto Customer)> GetOrderWithCustomerAsync(Guid orderId)
+{
+    var orderTask = _orderRepository.GetByIdAsync(orderId);
+    var customerTask = _customerRepository.GetByOrderIdAsync(orderId);
+    
+    await Task.WhenAll(orderTask, customerTask);
+    
+    return (_mapper.Map<OrderDto>(orderTask.Result), _mapper.Map<CustomerDto>(customerTask.Result));
+}
+```
+
+---
+
+## 11. Exception Handling
+
+### Global Exception Handling Middleware
+
+```csharp
+public class GlobalExceptionHandlingMiddleware
+{
+    private readonly RequestDelegate _next;
+    private readonly ILogger<GlobalExceptionHandlingMiddleware> _logger;
+    private readonly IHostEnvironment _environment;
+    
+    public GlobalExceptionHandlingMiddleware(
+        RequestDelegate next, 
+        ILogger<GlobalExceptionHandlingMiddleware> logger,
+        IHostEnvironment environment)
+    {
+        _next = next;
+        _logger = logger;
+        _environment = environment;
+    }
+    
+    public async Task InvokeAsync(HttpContext context)
+    {
+        try
+        {
+            await _next(context);
+        }
+        catch (Exception ex)
+        {
+            await HandleExceptionAsync(context, ex);
+        }
+    }
+    
+    private async Task HandleExceptionAsync(HttpContext context, Exception exception)
+    {
+        _logger.LogError(exception, "An unhandled exception occurred");
+        
+        context.Response.ContentType = "application/json";
+        
+        var response = exception switch
+        {
+            DomainException domainEx => new ApiResponse<string>
+            {
+                Success = false,
+                Message = "Business rule violation",
+                Errors = new List<string> { domainEx.Message }
+            },
+            ValidationException validationEx => new ApiResponse<string>
+            {
+                Success = false,
+                Message = "Validation failed",
+                Errors = validationEx.Errors.Select(e => e.ErrorMessage).ToList()
+            },
+            NotFoundException notFoundEx => new ApiResponse<string>
+            {
+                Success = false,
+                Message = "Resource not found",
+                Errors = new List<string> { notFoundEx.Message }
+            },
+            _ => new ApiResponse<string>
+            {
+                Success = false,
+                Message = "An error occurred",
+                Errors = new List<string> { _environment.IsDevelopment() ? exception.Message : "Internal server error" }
+            }
+        };
+        
+        context.Response.StatusCode = exception switch
+        {
+            DomainException => StatusCodes.Status400BadRequest,
+            ValidationException => StatusCodes.Status400BadRequest,
+            NotFoundException => StatusCodes.Status404NotFound,
+            UnauthorizedAccessException => StatusCodes.Status401Unauthorized,
+            _ => StatusCodes.Status500InternalServerError
+        };
+        
+        var jsonResponse = JsonSerializer.Serialize(response, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        });
+        
+        await context.Response.WriteAsync(jsonResponse);
+    }
+}
+```
+
+### Custom Exceptions
+
+```csharp
+public class DomainException : Exception
+{
+    public DomainException(string message) : base(message) { }
+    public DomainException(string message, Exception innerException) : base(message, innerException) { }
+}
+
+public class NotFoundException : Exception
+{
+    public NotFoundException(string message) : base(message) { }
+    public NotFoundException(string entityName, object id) : base($"{entityName} with id '{id}' not found") { }
+}
+
+public class BusinessRuleValidationException : DomainException
+{
+    public string RuleName { get; }
+    
+    public BusinessRuleValidationException(string ruleName, string message) : base(message)
+    {
+        RuleName = ruleName;
+    }
+}
+```
+
+---
+
+## 12. Dependency Injection
+
+### Service Registration
+
+```csharp
+public static class ServiceCollectionExtensions
+{
+    public static IServiceCollection AddApplicationServices(this IServiceCollection services)
+    {
+        // Register services by layer
+        services.AddScoped<IOrderService, OrderService>();
+        services.AddScoped<ICustomerService, CustomerService>();
+        services.AddScoped<IProductService, ProductService>();
+        
+        // Register validators
+        services.AddValidatorsFromAssemblyContaining<CreateOrderRequestValidator>();
+        services.AddFluentValidationAutoValidation();
+        
+        // Register AutoMapper
+        services.AddAutoMapper(typeof(OrderMappingProfile).Assembly);
+        
+        return services;
+    }
+    
+    public static IServiceCollection AddInfrastructureServices(
+        this IServiceCollection services, 
+        IConfiguration configuration)
+    {
+        // Database
+        services.AddDbContext<AppDbContext>(options =>
+        {
+            options.UseSqlServer(configuration.GetConnectionString("DefaultConnection"));
+            options.EnableSensitiveDataLogging(false);
+            options.EnableDetailedErrors(false);
+        });
+        
+        // Repositories
+        services.AddScoped<IOrderRepository, OrderRepository>();
+        services.AddScoped<ICustomerRepository, CustomerRepository>();
+        
+        // External services
+        services.AddHttpClient<IEmailService, EmailService>(client =>
+        {
+            client.BaseAddress = new Uri(configuration["EmailService:BaseUrl"]!);
+            client.Timeout = TimeSpan.FromSeconds(30);
+        });
+        
+        return services;
+    }
+}
+```
+
+### Service Lifetime Guidelines
+
+| Service Type | Lifetime | Reason |
+|-------------|----------|---------|
+| Controllers | Scoped | Per HTTP request |
+| Application Services | Scoped | Per HTTP request |
+| Repositories | Scoped | Per HTTP request, DbContext is scoped |
+| DbContext | Scoped | Per HTTP request |
+| AutoMapper | Singleton | Thread-safe, expensive to create |
+| Validators | Singleton | Thread-safe, stateless |
+| External HTTP Clients | Singleton/Named | Connection pooling |
+| Logging | Singleton | Built-in DI registration |
+
+---
+
+## 13. Logging Standards
+
+### Structured Logging with Serilog
+
+```csharp
+// Program.cs configuration
+builder.Host.UseSerilog((context, configuration) =>
+{
+    configuration
+        .ReadFrom.Configuration(context.Configuration)
+        .Enrich.FromLogContext()
+        .Enrich.WithMachineName()
+        .Enrich.WithThreadId()
+        .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}")
+        .WriteTo.File(
+            path: "logs/app-.txt",
+            rollingInterval: RollingInterval.Day,
+            retainedFileCountLimit: 30,
+            outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff} {Level:u3}] [{SourceContext}] {Message:lj} {Properties:j}{NewLine}{Exception}")
+        .WriteTo.Seq("http://localhost:5341"); // If using Seq
+});
+```
+
+### Logging Best Practices
+
+```csharp
+public class OrderService : IOrderService
+{
+    private readonly ILogger<OrderService> _logger;
+    
+    public async Task<OrderDto> CreateAsync(CreateOrderRequest request, CancellationToken cancellationToken)
+    {
+        // ✅ Structure logging with parameters
+        _logger.LogInformation("Creating order for customer {CustomerId} with {ItemCount} items", 
+            request.CustomerId, request.Items.Count);
+            
+        try
+        {
+            var order = Order.Create(request.CustomerId);
+            
+            foreach (var item in request.Items)
+            {
+                order.AddItem(item.ProductId, item.Quantity, item.UnitPrice);
+            }
+            
+            await _orderRepository.AddAsync(order, cancellationToken);
+            await _orderRepository.SaveChangesAsync(cancellationToken);
+            
+            // ✅ Log success with correlation ID
+            _logger.LogInformation("Order {OrderId} created successfully for customer {CustomerId}", 
+                order.Id, request.CustomerId);
+                
+            return _mapper.Map<OrderDto>(order);
+        }
+        catch (DomainException ex)
+        {
+            // ✅ Log business rule violations as warnings
+            _logger.LogWarning(ex, "Domain rule violation while creating order for customer {CustomerId}: {ErrorMessage}",
+                request.CustomerId, ex.Message);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // ✅ Log unexpected errors
+            _logger.LogError(ex, "Unexpected error occurred while creating order for customer {CustomerId}",
+                request.CustomerId);
+            throw;
+        }
+    }
+}
+```
+
+### Log Levels Usage
+
+| Level | Usage | Example |
+|-------|-------|---------|
+| Trace | Very detailed debugging | Method entry/exit with parameters |
+| Debug | Debugging information | SQL queries, cache hits/misses |
+| Information | General information | Request received, order created |
+| Warning | Unusual but expected | Validation failures, business rule violations |
+| Error | Error conditions | Exceptions, failed operations |
+| Critical | Critical failures | Database unavailable, service crashed |
+
+---
+
+## 14. Security Guidelines
+
+### Authentication & Authorization
+
+```csharp
+// JWT Configuration
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(configuration["JWT:Secret"]!)),
+            ValidateIssuer = true,
+            ValidIssuer = configuration["JWT:Issuer"],
+            ValidateAudience = true,
+            ValidAudience = configuration["JWT:Audience"],
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.Zero
+        };
+    });
+
+// Authorization Policies
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("AdminOnly", policy => 
+        policy.RequireRole("Admin"));
+    options.AddPolicy("CanViewOrders", policy => 
+        policy.RequireAssertion(context =>
+            context.User.IsInRole("Admin") || 
+            context.User.IsInRole("OrderViewer")));
+});
+```
+
+### Controller Security
+
+```csharp
+[Authorize]
+[ApiController]
+[Route("api/[controller]")]
+public class OrdersController : ControllerBase
+{
+    [HttpGet]
+    [Authorize(Policy = "CanViewOrders")]
+    public async Task<IActionResult> GetOrders(
+        [FromQuery] GetOrdersRequest request,
+        CancellationToken cancellationToken)
+    {
+        // Ensure user can only see their own orders unless admin
+        if (!User.IsInRole("Admin"))
+        {
+            request.CustomerId = GetCurrentUserId();
+        }
+        
+        var orders = await _orderService.GetOrdersAsync(request, cancellationToken);
+        return Ok(ApiResponse<List<OrderDto>>.Ok(orders));
+    }
+    
+    [HttpPost]
+    [Authorize(Roles = "Customer,Admin")]
+    [ValidateAntiForgeryToken] // For forms
+    public async Task<IActionResult> Create([FromBody] CreateOrderRequest request)
+    {
+        // Ensure user can only create orders for themselves unless admin
+        if (!User.IsInRole("Admin"))
+        {
+            request.CustomerId = GetCurrentUserId();
+        }
+        
+        // Implementation...
+    }
+    
+    private Guid GetCurrentUserId()
+    {
+        var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier);
+        return Guid.Parse(userIdClaim?.Value ?? throw new UnauthorizedAccessException("User ID not found"));
+    }
+}
+```
+
+### Input Validation & Sanitization
+
+```csharp
+public class SecurityService
+{
+    private static readonly Regex AllowedCharactersRegex = new(@"^[a-zA-Z0-9\s\-_.,!?]+$");
+    
+    public static string SanitizeInput(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            return string.Empty;
+            
+        // Remove potentially dangerous characters
+        input = input.Trim();
+        input = Regex.Replace(input, @"[<>""'%;()&+]", "");
+        
+        return input;
+    }
+    
+    public static bool IsValidInput(string input)
+    {
+        return !string.IsNullOrWhiteSpace(input) && AllowedCharactersRegex.IsMatch(input);
+    }
+}
+```
+
+---
+
+## 15. Testing Standards
+
+### Unit Test Structure
+
+```csharp
+public class OrderServiceTests
+{
+    private readonly Mock<IOrderRepository> _orderRepositoryMock;
+    private readonly Mock<ILogger<OrderService>> _loggerMock;
+    private readonly Mock<IMapper> _mapperMock;
+    private readonly OrderService _orderService;
+    
+    public OrderServiceTests()
+    {
+        _orderRepositoryMock = new Mock<IOrderRepository>();
+        _loggerMock = new Mock<ILogger<OrderService>>();
+        _mapperMock = new Mock<IMapper>();
+        _orderService = new OrderService(_orderRepositoryMock.Object, _loggerMock.Object, _mapperMock.Object);
+    }
+    
+    [Fact]
+    public async Task CreateAsync_WithValidRequest_ShouldReturnOrderDto()
+    {
+        // Arrange
+        var customerId = Guid.NewGuid();
+        var request = new CreateOrderRequest
+        {
+            CustomerId = customerId,
+            Items = new List<CreateOrderRequest.CreateOrderItemRequest>
+            {
+                new() { ProductId = Guid.NewGuid(), Quantity = 2, UnitPrice = 10.50m }
+            }
+        };
+        
+        var expectedOrder = Order.Create(customerId);
+        var expectedDto = new OrderDto { Id = expectedOrder.Id, CustomerId = customerId };
+        
+        _orderRepositoryMock
+            .Setup(x => x.AddAsync(It.IsAny<Order>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(expectedOrder);
+            
+        _mapperMock
+            .Setup(x => x.Map<OrderDto>(It.IsAny<Order>()))
+            .Returns(expectedDto);
+        
+        // Act
+        var result = await _orderService.CreateAsync(request, CancellationToken.None);
+        
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal(expectedDto.Id, result.Id);
+        Assert.Equal(expectedDto.CustomerId, result.CustomerId);
+        
+        _orderRepositoryMock.Verify(x => x.AddAsync(It.IsAny<Order>(), It.IsAny<CancellationToken>()), Times.Once);
+        _orderRepositoryMock.Verify(x => x.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
+    }
+    
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task CreateAsync_WithInvalidQuantity_ShouldThrowDomainException(int invalidQuantity)
+    {
+        // Arrange
+        var request = new CreateOrderRequest
+        {
+            CustomerId = Guid.NewGuid(),
+            Items = new List<CreateOrderRequest.CreateOrderItemRequest>
+            {
+                new() { ProductId = Guid.NewGuid(), Quantity = invalidQuantity, UnitPrice = 10.50m }
+            }
+        };
+        
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<DomainException>(() => 
+            _orderService.CreateAsync(request, CancellationToken.None));
+            
+        Assert.Contains("Quantity must be greater than zero", exception.Message);
+    }
+}
+```
+
+### Integration Test Example
+
+```csharp
+[Collection("Database")]
+public class OrdersControllerIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly WebApplicationFactory<Program> _factory;
+    private readonly HttpClient _client;
+    
+    public OrdersControllerIntegrationTests(WebApplicationFactory<Program> factory)
+    {
+        _factory = factory;
+        _client = factory.CreateClient();
+    }
+    
+    [Fact]
+    public async Task CreateOrder_WithValidData_ShouldReturn201()
+    {
+        // Arrange
+        var request = new CreateOrderRequest
+        {
+            CustomerId = Guid.NewGuid(),
+            Items = new List<CreateOrderRequest.CreateOrderItemRequest>
+            {
+                new() { ProductId = Guid.NewGuid(), Quantity = 2, UnitPrice = 15.99m }
+            }
+        };
+        
+        var json = JsonSerializer.Serialize(request);
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
+        
+        // Act
+        var response = await _client.PostAsync("/api/orders", content);
+        
+        // Assert
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        
+        var responseContent = await response.Content.ReadAsStringAsync();
+        var apiResponse = JsonSerializer.Deserialize<ApiResponse<OrderResponse>>(responseContent, 
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            
+        Assert.NotNull(apiResponse);
+        Assert.True(apiResponse.Success);
+        Assert.NotNull(apiResponse.Data);
+        Assert.Equal(request.CustomerId, apiResponse.Data.CustomerId);
+    }
+}
+```
+
+### Test Data Builders
+
+```csharp
+public class OrderTestDataBuilder
+{
+    private Guid _customerId = Guid.NewGuid();
+    private List<OrderItem> _items = new();
+    
+    public OrderTestDataBuilder WithCustomerId(Guid customerId)
+    {
+        _customerId = customerId;
+        return this;
+    }
+    
+    public OrderTestDataBuilder WithItem(Guid productId, int quantity, decimal unitPrice)
+    {
+        _items.Add(new OrderItem(productId, quantity, unitPrice));
+        return this;
+    }
+    
+    public Order Build()
+    {
+        var order = Order.Create(_customerId);
+        foreach (var item in _items)
+        {
+            order.AddItem(item.ProductId, item.Quantity, item.UnitPrice);
+        }
+        return order;
+    }
+    
+    public static OrderTestDataBuilder Create() => new();
+}
+
+// Usage in tests
+var order = OrderTestDataBuilder
+    .Create()
+    .WithCustomerId(customerId)
+    .WithItem(productId, 2, 19.99m)
+    .Build();
+```
+
+---
+
+## 16. Code Review Checklist
+
+### Architecture & Design
+
+- [ ] **Layer Separation**: Are layers properly separated with correct dependencies?
+- [ ] **Single Responsibility**: Does each class have a single, well-defined responsibility?
+- [ ] **Domain Logic**: Is business logic properly encapsulated in the domain layer?
+- [ ] **Repository Pattern**: Are repositories used correctly for data access?
+- [ ] **Dependency Injection**: Are dependencies properly injected and not tightly coupled?
+
+### Code Quality
+
+- [ ] **Naming Conventions**: Are naming conventions followed consistently?
+- [ ] **Method Size**: Are methods reasonably sized (typically < 20 lines)?
+- [ ] **Class Size**: Are classes focused and not overly large?
+- [ ] **Comments**: Is code self-documenting with minimal but meaningful comments?
+- [ ] **Magic Numbers**: Are magic numbers replaced with named constants?
+
+### Error Handling
+
+- [ ] **Exception Handling**: Are exceptions handled appropriately at the right layer?
+- [ ] **Custom Exceptions**: Are custom exceptions used for domain-specific errors?
+- [ ] **Logging**: Are errors logged with appropriate context and severity?
+- [ ] **User-Friendly Messages**: Are error messages meaningful to end users?
+
+### Performance
+
+- [ ] **Async/Await**: Are async patterns used correctly for I/O operations?
+- [ ] **N+1 Queries**: Are database queries optimized to avoid N+1 problems?
+- [ ] **Caching**: Is caching implemented where appropriate?
+- [ ] **Resource Disposal**: Are disposable resources properly disposed of?
+
+### Security
+
+- [ ] **Input Validation**: Is user input properly validated and sanitized?
+- [ ] **Authorization**: Are authorization checks in place for protected resources?
+- [ ] **SQL Injection**: Are parameterized queries used to prevent SQL injection?
+- [ ] **Sensitive Data**: Is sensitive data properly protected and not logged?
+
+### Testing
+
+- [ ] **Unit Tests**: Are unit tests written for business logic?
+- [ ] **Test Coverage**: Is there adequate test coverage for critical paths?
+- [ ] **Test Naming**: Are test names descriptive and follow conventions?
+- [ ] **Test Independence**: Are tests independent and not relying on external state?
+
+### API Design
+
+- [ ] **REST Conventions**: Are REST conventions followed for endpoints?
+- [ ] **HTTP Status Codes**: Are appropriate HTTP status codes used?
+- [ ] **Consistent Response Format**: Is the response format consistent across endpoints?
+- [ ] **API Documentation**: Are endpoints properly documented with XML comments?
+
+---
+
+## 17. Performance Guidelines
+
+### Database Performance
+
+```csharp
+// ✅ Good - Use projection to select only needed fields
+public async Task<List<OrderSummaryDto>> GetOrderSummariesAsync(Guid customerId)
+{
+    return await _context.Orders
+        .Where(o => o.CustomerId == customerId)
+        .Select(o => new OrderSummaryDto
+        {
+            Id = o.Id,
+            OrderDate = o.CreatedDate,
+            TotalAmount = o.Items.Sum(i => i.Quantity * i.UnitPrice),
+            Status = o.Status.ToString()
+        })
+        .ToListAsync();
+}
+
+// ✅ Good - Use Include for related data you need
+public async Task<Order?> GetOrderWithItemsAsync(Guid id)
+{
+    return await _context.Orders
+        .Include(o => o.Items)
+        .AsSplitQuery() // Prevents cartesian explosion
+        .FirstOrDefaultAsync(o => o.Id == id);
+}
+
+// ✅ Good - Use AsNoTracking for read-only queries
+public async Task<List<OrderDto>> GetOrdersReadOnlyAsync(int skip, int take)
+{
+    return await _context.Orders
+        .AsNoTracking()
+        .OrderByDescending(o => o.CreatedDate)
+        .Skip(skip)
+        .Take(take)
+        .Select(o => new OrderDto { /* mapping */ })
+        .ToListAsync();
+}
+```
+
+### Caching Strategies
+
+```csharp
+public class OrderService : IOrderService
+{
+    private readonly IMemoryCache _cache;
+    private readonly IOrderRepository _repository;
+    private const int CacheExpirationMinutes = 30;
+    
+    public async Task<OrderDto?> GetByIdAsync(Guid id, CancellationToken cancellationToken)
+    {
+        var cacheKey = $"order_{id}";
+        
+        if (_cache.TryGetValue(cacheKey, out OrderDto? cachedOrder))
+        {
+            return cachedOrder;
+        }
+        
+        var order = await _repository.GetByIdAsync(id, cancellationToken);
+        if (order == null) return null;
+        
+        var orderDto = _mapper.Map<OrderDto>(order);
+        
+        _cache.Set(cacheKey, orderDto, TimeSpan.FromMinutes(CacheExpirationMinutes));
+        
+        return orderDto;
+    }
+    
+    // Invalidate cache when order is updated
+    public async Task UpdateAsync(Guid id, UpdateOrderRequest request, CancellationToken cancellationToken)
+    {
+        await _repository.UpdateAsync(id, request, cancellationToken);
+        
+        var cacheKey = $"order_{id}";
+        _cache.Remove(cacheKey);
+    }
+}
+```
+
+### Background Processing
+
+```csharp
+// For long-running tasks, use background services
+public class OrderProcessingBackgroundService : BackgroundService
+{
+    private readonly IServiceProvider _serviceProvider;
+    private readonly ILogger<OrderProcessingBackgroundService> _logger;
+    
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var orderService = scope.ServiceProvider.GetRequiredService<IOrderService>();
+            
+            try
+            {
+                await orderService.ProcessPendingOrdersAsync(stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing pending orders");
+            }
+            
+            await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+        }
+    }
+}
+```
+
+---
+
+## 18. Documentation Standards
+
+### XML Documentation
+
+```csharp
+/// <summary>
+/// Service for managing order operations including creation, retrieval, and updates.
+/// </summary>
+public class OrderService : IOrderService
+{
+    /// <summary>
+    /// Creates a new order for the specified customer.
+    /// </summary>
+    /// <param name="request">The order creation request containing customer ID and items.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    /// <returns>A task representing the asynchronous operation that returns the created order DTO.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when request is null.</exception>
+    /// <exception cref="DomainException">Thrown when business rules are violated.</exception>
+    /// <exception cref="ValidationException">Thrown when validation fails.</exception>
+    public async Task<OrderDto> CreateAsync(CreateOrderRequest request, CancellationToken cancellationToken = default)
+    {
+        // Implementation
+    }
+}
+```
+
+### README Structure
+
+```markdown
+# Project Name
+
+## Overview
+Brief description of the project and its purpose.
+
+## Architecture
+- Domain-Driven Design (DDD)
+- Clean Architecture
+- Repository Pattern
+- CQRS (if applicable)
+
+## Technology Stack
+- .NET 8
+- Entity Framework Core
+- AutoMapper
+- FluentValidation
+- xUnit
+- Docker
+
+## Getting Started
+
+### Prerequisites
+- .NET 8 SDK
+- SQL Server
+- Docker (optional)
+
+### Installation
+1. Clone the repository
+2. Restore packages: `dotnet restore`
+3. Update database: `dotnet ef database update`
+4. Run the application: `dotnet run`
+
+## API Documentation
+Swagger UI available at `/swagger` when running in development mode.
+
+## Testing
+Run tests with: `dotnet test`
+
+## Deployment
+[Deployment instructions]
+```
+
+---
+
+## Summary
+
+This comprehensive coding standards document establishes guidelines for building maintainable, scalable, and secure .NET Web APIs using modern practices and patterns. Key principles include:
+
+### Core Principles
+- **Clean Architecture**: Proper layer separation and dependency management
+- **Domain-Driven Design**: Business logic encapsulation and domain modeling
+- **SOLID Principles**: Single responsibility, open/closed, Liskov substitution, interface segregation, dependency inversion
+- **Async First**: Asynchronous programming for all I/O operations
+- **Security by Design**: Authentication, authorization, and input validation
+- **Testability**: Unit and integration testing with good coverage
+
+### Quality Assurance
+- **Code Reviews**: Mandatory reviews using the provided checklist
+- **Automated Testing**: Unit, integration, and end-to-end tests
+- **Performance Monitoring**: Database optimization and caching strategies
+- **Documentation**: Comprehensive API and code documentation
+- **Logging**: Structured logging for debugging and monitoring
+
+### Consistency
+- **Naming Conventions**: Standardized naming across all code elements
+- **Error Handling**: Consistent exception handling and user-friendly messages
+- **API Design**: RESTful endpoints with standardized response formats
+- **Validation**: FluentValidation for all input validation
+
+By following these standards, teams can ensure code quality, maintainability, and consistency across all .NET Web API projects.
+
+---
+
+**Document End**
+
+*Save this document as `dotnet-coding-standards.md` for use in your development team.*
